@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import asdict
+import time
 
 import numpy as np
 import torch
@@ -114,9 +115,17 @@ def main(config: ModelConfig) -> None:
     accelerator.print(count_parameters(model))
     accelerator.print(count_parameters_per_layer(model))
 
+    if train_config.use_wandb:
+        accelerator.log({
+            "model/total_parameters": count_parameters(model),
+            "training/learning_rate": train_config.lr,
+            "training/batch_size": train_config.batch_size,
+        })
+
     ### Train:
     for i in range(1, train_config.n_epoch + 1):
         accelerator.print(f"epoch: {i}")
+        epoch_loss = 0
 
         for x, y in tqdm(train_loader):
             x = x / config.vae_cfg.vae_scale_factor
@@ -165,7 +174,11 @@ def main(config: ModelConfig) -> None:
 
                 pred = model(x_noisy, noise_level.view(-1, 1), label)
                 loss = loss_fn(pred, x)
-                accelerator.log({"train_loss": loss.item()}, step=global_step)
+                epoch_loss += loss.item()
+
+                if train_config.use_wandb:
+                    accelerator.log({"train_loss": loss.item()}, step=global_step)
+
                 accelerator.backward(loss)
                 optimizer.step()
 
@@ -173,6 +186,22 @@ def main(config: ModelConfig) -> None:
                     update_ema(ema_model, model, alpha=train_config.alpha)
 
             global_step += 1
+
+            if train_config.use_wandb:
+                accelerator.log({
+                    "training/step_loss": loss.item(),
+                    "training/global_step": global_step,
+                    "training/signal_level": signal_level.mean().item(),
+                    "training/noise_level": noise_level.mean().item(),
+                    "training/grad_norm": nn.utils.clip_grad_norm_(model.parameters(), float('inf')).item(),
+                }, step=global_step)
+
+        avg_epoch_loss = epoch_loss / len(train_loader)
+        if train_config.use_wandb:
+            accelerator.log({
+                "epoch_loss": avg_epoch_loss,
+            }, step=global_step)
+
     accelerator.end_training()
 
 
